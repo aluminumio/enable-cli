@@ -126,7 +126,7 @@ module Enable
 
       response = HTTP::Client.post(uri, headers: headers, body: body)
       unless response.success?
-        STDERR.puts "Failed to start device authorization: #{response.body}"
+        STDERR.puts "Failed to start device authorization (#{response.status_code}): #{response.body}"
         exit 1
       end
 
@@ -464,17 +464,7 @@ json_flag = false
 quiet_flag = false
 limit_flag = "25"
 verbose_flag = false
-
-# Rewrite bare resource names to resource:list
-known_resources = %w[companies contracts tasks approvals activity profiles conversations]
-if ARGV.size > 0 && known_resources.includes?(ARGV[0]) && (ARGV.size == 1 || ARGV[1]?.try(&.starts_with?("-")))
-  ARGV[0] = "#{ARGV[0]}:list"
-end
-
-# Extract command before parsing flags
-command = ARGV.shift? || "help"
-
-# Parse global flags from remaining ARGV
+command = "help"
 remaining_args = [] of String
 assignee_flag : String? = nil
 status_flag : String? = nil
@@ -494,6 +484,16 @@ OptionParser.parse(ARGV) do |parser|
   parser.unknown_args do |args|
     remaining_args = args
   end
+end
+
+# First positional arg is the command
+command = remaining_args.shift? || command
+command = "help" if command == "help"
+
+# Rewrite bare resource names to resource:list
+known_resources = %w[companies contracts tasks approvals activity profiles conversations]
+if known_resources.includes?(command)
+  command = "#{command}:list"
 end
 
 Enable::Output.json_mode! if json_flag
