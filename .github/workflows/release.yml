@@ -13,9 +13,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: enable-linux-amd64
+            artifact: enbl-linux-amd64
           - os: macos-15
-            artifact: enable-darwin-arm64
+            artifact: enbl-darwin-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5

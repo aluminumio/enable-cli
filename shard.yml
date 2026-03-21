@@ -1,9 +1,9 @@
-name: enable
-version: 0.1.0
+name: enbl
+version: 0.2.0
 authors:
   - Aluminum <admin@aluminumio.com>
 targets:
-  enable:
+  enbl:
     main: src/enable.cr
 crystal: ">= 1.11.0"
 license: MIT

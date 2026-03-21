@@ -41,7 +41,7 @@ module Enable
 
     def load_credentials : Credentials
       unless File.exists?(CREDENTIALS_FILE)
-        STDERR.puts "Not logged in. Run: enable login"
+        STDERR.puts "Not logged in. Run: enbl login"
         exit 1
       end
       Credentials.from_json(File.read(CREDENTIALS_FILE))
@@ -100,7 +100,7 @@ module Enable
                  end
 
       if response.status_code == 401
-        raise AuthError.new("Session expired. Run: enable login")
+        raise AuthError.new("Session expired. Run: enbl login")
       end
 
       unless response.success?
@@ -188,7 +188,7 @@ module Enable
         end
       end
 
-      STDERR.puts "Authorization timed out. Run: enable login"
+      STDERR.puts "Authorization timed out. Run: enbl login"
       exit 1
     end
 
@@ -489,7 +489,7 @@ OptionParser.parse(ARGV) do |parser|
   parser.on("--assignee=ID", "Filter by assignee") { |v| assignee_flag = v }
   parser.on("--status=STATUS", "Filter by status") { |v| status_flag = v }
   parser.on("--priority=PRIORITY", "Filter by priority") { |v| priority_flag = v }
-  parser.on("--version", "Show version") { puts "enable #{Enable::VERSION}"; exit 0 }
+  parser.on("--version", "Show version") { puts "enbl #{Enable::VERSION}"; exit 0 }
   parser.on("-h", "--help", "Show help") { command = "help" }
   parser.unknown_args do |args|
     remaining_args = args
@@ -503,11 +503,11 @@ begin
   case command
   when "help"
     puts <<-HELP
-    enable — CLI for the Enable AI workforce platform
+    enbl — CLI for the Enable AI workforce platform
 
     USAGE
-      enable <resource>:<action> [options]
-      enable <resource> [options]          (defaults to :list)
+      enbl <resource>:<action> [options]
+      enbl <resource> [options]          (defaults to :list)
 
     COMMANDS
       login                  Authenticate via browser (OAuth device flow)
@@ -542,10 +542,10 @@ begin
       --priority=PRIORITY    Filter by priority
 
     EXAMPLES
-      enable login
-      enable tasks --status=in_progress --assignee=<id>
-      enable tasks:show <id> --json
-      enable contracts -c <company-id>
+      enbl login
+      enbl tasks --status=in_progress --assignee=<id>
+      enbl tasks:show <id> --json
+      enbl contracts -c <company-id>
     HELP
   when "login"
     Enable::Auth.login
@@ -556,7 +556,7 @@ begin
   when "companies:list"
     Enable.cmd_companies_list
   when "companies:show"
-    id = remaining_args[0]? || (STDERR.puts "Usage: enable companies:show <id>"; exit 1)
+    id = remaining_args[0]? || (STDERR.puts "Usage: enbl companies:show <id>"; exit 1)
     Enable.cmd_companies_show(id)
   when "contracts:list"
     cid = Enable.resolve_company(company_flag)
@@ -565,7 +565,7 @@ begin
     Enable.cmd_contracts_list(cid, params)
   when "contracts:show"
     cid = Enable.resolve_company(company_flag)
-    id = remaining_args[0]? || (STDERR.puts "Usage: enable contracts:show <id>"; exit 1)
+    id = remaining_args[0]? || (STDERR.puts "Usage: enbl contracts:show <id>"; exit 1)
     Enable.cmd_contracts_show(cid, id)
   when "tasks:list"
     cid = Enable.resolve_company(company_flag)
@@ -576,7 +576,7 @@ begin
     Enable.cmd_tasks_list(cid, params)
   when "tasks:show"
     cid = Enable.resolve_company(company_flag)
-    id = remaining_args[0]? || (STDERR.puts "Usage: enable tasks:show <id>"; exit 1)
+    id = remaining_args[0]? || (STDERR.puts "Usage: enbl tasks:show <id>"; exit 1)
     Enable.cmd_tasks_show(cid, id)
   when "approvals:list"
     cid = Enable.resolve_company(company_flag)
@@ -585,7 +585,7 @@ begin
     Enable.cmd_approvals_list(cid, params)
   when "approvals:show"
     cid = Enable.resolve_company(company_flag)
-    id = remaining_args[0]? || (STDERR.puts "Usage: enable approvals:show <id>"; exit 1)
+    id = remaining_args[0]? || (STDERR.puts "Usage: enbl approvals:show <id>"; exit 1)
     Enable.cmd_approvals_show(cid, id)
   when "activity:list"
     cid = Enable.resolve_company(company_flag)
@@ -593,7 +593,7 @@ begin
   when "profiles:list"
     Enable.cmd_profiles_list({"per_page" => limit_flag})
   else
-    STDERR.puts "Unknown command: #{command}. Run: enable --help"
+    STDERR.puts "Unknown command: #{command}. Run: enbl --help"
     exit 1
   end
 rescue ex : Enable::AuthError
