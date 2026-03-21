@@ -1,99 +1,57 @@
-name: Release
+name: CI
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
     strategy:
       matrix:
         include:
-          - os: macos-14
-            target: macos-arm64
-          - os: macos-13
-            target: macos-x86_64
           - os: ubuntu-latest
-            target: linux-x86_64
+            artifact: enable-linux-amd64
+          - os: macos-15
+            artifact: enable-darwin-arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: crystal-lang/install-crystal@v1
+      - uses: actions/checkout@v5
+      - uses: aluminumio/install-crystal@master
+      - run: crystal build src/enable.cr -o bin/${{ matrix.artifact }} --release --no-debug
+      - uses: actions/upload-artifact@v7
         with:
-          crystal: latest
-      - run: crystal build src/enable.cr -o enable --release --no-debug
-      - run: tar czf enable-${{ matrix.target }}.tar.gz enable
-      - uses: actions/upload-artifact@v4
-        with:
-          name: enable-${{ matrix.target }}
-          path: enable-${{ matrix.target }}.tar.gz
+          name: ${{ matrix.artifact }}
+          path: bin/${{ matrix.artifact }}
 
-  release:
+  publish:
     needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: '**/*.tar.gz'
-          generate_release_notes: true
-
-  update-homebrew:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: aluminumio/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
-      - name: Update formula
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          ARM64_SHA=$(shasum -a 256 artifacts/enable-macos-arm64/enable-macos-arm64.tar.gz | cut -d' ' -f1)
-          X86_SHA=$(shasum -a 256 artifacts/enable-macos-x86_64/enable-macos-x86_64.tar.gz | cut -d' ' -f1)
-          LINUX_SHA=$(shasum -a 256 artifacts/enable-linux-x86_64/enable-linux-x86_64.tar.gz | cut -d' ' -f1)
-          cat > homebrew-tap/Formula/enable.rb << FORMULA
-          class Enable < Formula
-            desc "CLI for the Enable AI workforce platform"
-            homepage "https://github.com/aluminumio/enable-cli"
-            version "$VERSION"
-            license "MIT"
+          merge-multiple: true
 
-            on_macos do
-              if Hardware::CPU.arm?
-                url "https://github.com/aluminumio/enable-cli/releases/download/v$VERSION/enable-macos-arm64.tar.gz"
-                sha256 "$ARM64_SHA"
-              else
-                url "https://github.com/aluminumio/enable-cli/releases/download/v$VERSION/enable-macos-x86_64.tar.gz"
-                sha256 "$X86_SHA"
-              end
-            end
+      - name: Read version
+        id: version
+        run: echo "version=$(grep '^version:' shard.yml | awk '{print $2}')" >> $GITHUB_OUTPUT
 
-            on_linux do
-              url "https://github.com/aluminumio/enable-cli/releases/download/v$VERSION/enable-linux-x86_64.tar.gz"
-              sha256 "$LINUX_SHA"
-            end
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v${{ steps.version.outputs.version }}" artifacts/* --generate-notes
 
-            def install
-              bin.install "enable"
-            end
-
-            test do
-              assert_match version.to_s, shell_output("#{bin}/enable --version")
-            end
-          end
-          FORMULA
-      - name: Push formula update
-        working-directory: homebrew-tap
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/enable.rb
-          git commit -m "Update enable to ${GITHUB_REF#refs/tags/v}"
-          git push
+      - name: Notify Homebrew tap
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.REPO_DISPATCH_TOKEN }}
+          repository: aluminumio/homebrew-tap
+          event-type: enable-cli-released
+          client-payload: '{"version": "${{ steps.version.outputs.version }}"}'
