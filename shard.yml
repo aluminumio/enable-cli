@@ -1,0 +1,9 @@
+name: enable
+version: 0.1.0
+authors:
+  - Aluminum <admin@aluminumio.com>
+targets:
+  enable:
+    main: src/enable.cr
+crystal: ">= 1.11.0"
+license: MIT
