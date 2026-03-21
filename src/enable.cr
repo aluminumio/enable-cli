@@ -117,73 +117,54 @@ module Enable
 
     def login
       config = Config.load_config
+      headers = HTTP::Headers{"Content-Type" => "application/json", "Accept" => "application/json"}
 
-      # Step 1: Request device authorization
-      uri = URI.parse("#{config.base_url}/oauth/authorize_device")
-
-      body = "client_id=enable-cli"
-      headers = HTTP::Headers{"Content-Type" => "application/x-www-form-urlencoded"}
-
-      response = HTTP::Client.post(uri, headers: headers, body: body)
+      # Step 1: Create auth session
+      response = HTTP::Client.post("#{config.base_url}/api/cli_auth", headers: headers)
       unless response.success?
-        STDERR.puts "Failed to start device authorization (#{response.status_code}): #{response.body}"
+        STDERR.puts "Failed to start auth (#{response.status_code}): #{response.body}"
         exit 1
       end
 
       data = JSON.parse(response.body)
-      device_code = data["device_code"].as_s
-      user_code = data["user_code"].as_s
-      verification_uri = data["verification_uri"].as_s
+      secret = data["secret"].as_s
+      authorize_url = data["authorize_url"].as_s
       expires_in = data["expires_in"].as_i
-      interval = data["interval"]?.try(&.as_i) || 5
 
-      puts "Open this URL in your browser:"
-      puts "  #{verification_uri}"
-      puts ""
-      puts "Enter code: #{user_code}"
+      puts "Opening browser to authorize..."
+      puts "  #{authorize_url}"
       puts ""
 
-      # Try to open browser
       {% if flag?(:darwin) %}
-        Process.run("open", [verification_uri])
+        Process.run("open", [authorize_url])
       {% elsif flag?(:linux) %}
-        Process.run("xdg-open", [verification_uri])
+        Process.run("xdg-open", [authorize_url])
       {% end %}
 
-      # Step 2: Poll for token
+      # Step 2: Poll for approval
       puts "Waiting for authorization..."
       deadline = Time.utc + expires_in.seconds
-      token_uri = URI.parse("#{config.base_url}/oauth/token")
+      resolve_url = "#{config.base_url}/api/cli_auth/resolve/#{secret}"
 
       loop do
-        sleep interval.seconds
+        sleep 1.seconds
         break if Time.utc > deadline
 
-        token_body = "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=#{device_code}&client_id=enable-cli"
-        token_response = HTTP::Client.post(token_uri, headers: headers, body: token_body)
+        poll = HTTP::Client.get(resolve_url, headers: headers)
+        next unless poll.success?
 
-        case token_response.status_code
-        when 200
-          token_data = JSON.parse(token_response.body)
+        result = JSON.parse(poll.body)
+        case result["code"].as_s
+        when "resolved"
           creds = Credentials.new(
-            access_token: token_data["access_token"].as_s,
-            refresh_token: token_data["refresh_token"]?.try(&.as_s),
+            access_token: result["token"].as_s,
+            email: result["email"]?.try(&.as_s),
           )
           Config.save_credentials(creds)
-          puts "Authenticated successfully."
+          puts "Authenticated as #{creds.email || "unknown"}."
           return
-        when 400
-          error = JSON.parse(token_response.body)
-          error_code = error["error"]?.try(&.as_s) || ""
-          case error_code
-          when "authorization_pending", "slow_down"
-            # Keep polling
-          else
-            STDERR.puts "Authorization failed: #{error_code}"
-            exit 1
-          end
-        else
-          STDERR.puts "Unexpected response: #{token_response.status_code}"
+        when "expired"
+          STDERR.puts "Session expired. Run: enbl login"
           exit 1
         end
       end
