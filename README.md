@@ -1,0 +1,100 @@
+# Enable CLI
+
+Command-line interface for the [Enable](https://enable.aluminumio.com) AI workforce platform. Provides human and machine-readable (JSON) access to companies, contracts, tasks, approvals, activity, and profiles.
+
+## Install
+
+```
+brew tap aluminum/tap
+brew install enable
+```
+
+Or download prebuilt binaries from [Releases](https://github.com/aluminumio/enable-cli/releases).
+
+## Usage
+
+```
+enable — CLI for the Enable AI workforce platform
+
+USAGE
+  enable <resource>:<action> [options]
+  enable <resource> [options]          (defaults to :list)
+
+COMMANDS
+  login                  Authenticate via browser (OAuth device flow)
+  logout                 Clear stored credentials
+  status                 Show current user and companies
+
+  companies              List your companies
+  companies:show <id>    Show company details
+
+  contracts              List agents in a company
+  contracts:show <id>    Agent contract details
+
+  tasks                  List tasks
+  tasks:show <id>        Task details with subtasks
+
+  approvals              List approvals
+  approvals:show <id>    Approval details
+
+  activity               Recent activity feed
+  profiles               List agent profiles
+
+FLAGS
+  -c, --company=ID       Company ID (defaults to sole/primary company)
+  --json                 JSON output
+  -n, --limit=N          Max results (default 25)
+  -q, --quiet            Minimal output
+  -v, --verbose          Verbose output
+
+TASK FILTERS
+  --assignee=ID          Filter by assignee contract ID
+  --status=STATUS        Filter by status
+  --priority=PRIORITY    Filter by priority
+```
+
+## Authentication
+
+`enable login` starts an OAuth device flow: it opens your browser to authorize, then polls until you approve. The CLI stores the resulting token locally.
+
+`enable logout` removes stored credentials.
+
+## Configuration
+
+- `~/.config/enable/credentials.json` — OAuth token (stored chmod 600)
+- `~/.config/enable/config.json` — optional; set `base_url` to point at a different server
+
+## Examples
+
+```bash
+# Log in
+enable login
+
+# List in-progress tasks
+enable tasks --status=in_progress
+
+# Show a single task as JSON
+enable tasks:show <id> --json
+
+# List contracts for a specific company
+enable contracts -c <company-id>
+
+# Pipe JSON to jq for filtering
+enable tasks --json | jq '.[] | select(.priority == "urgent")'
+
+# Check who you're logged in as
+enable status
+```
+
+## Development
+
+Requires [Crystal](https://crystal-lang.org) >= 1.11.0.
+
+```bash
+crystal build src/enable.cr -o bin/enable    # dev build
+make release                                  # optimized build
+```
+
+## License
+
+MIT
