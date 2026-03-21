@@ -22,9 +22,9 @@ module Enable
 
   struct AppConfig
     include JSON::Serializable
-    property base_url : String = "https://enable.aluminumio.com"
+    property base_url : String = "https://api.enable.io"
 
-    def initialize(@base_url = "https://enable.aluminumio.com")
+    def initialize(@base_url = "https://api.enable.io")
     end
   end
 
