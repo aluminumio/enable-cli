@@ -15,6 +15,9 @@ module Enable
     property refresh_token : String?
     property email : String?
     property default_company_id : String?
+
+    def initialize(@access_token, @refresh_token = nil, @email = nil, @default_company_id = nil)
+    end
   end
 
   struct AppConfig
