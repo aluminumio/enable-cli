@@ -75,7 +75,7 @@ module Enable
       request("POST", path, body: body)
     end
 
-    private def request(method : String, path : String, params = {} of String => String, body : String? = nil) : JSON::Any
+    private def request(method : String, path : String, params = {} of String => String, body : String? = nil, retried = false) : JSON::Any
       config = Config.load_config
       creds = Config.load_credentials
 
@@ -99,6 +99,13 @@ module Enable
                  else               raise "Unknown method: #{method}"
                  end
 
+      if response.status_code == 401 && !retried
+        if try_refresh
+          return request(method, path, params, body, retried: true)
+        end
+        raise AuthError.new("Session expired. Run: enbl login")
+      end
+
       if response.status_code == 401
         raise AuthError.new("Session expired. Run: enbl login")
       end
@@ -109,6 +116,27 @@ module Enable
       end
 
       JSON.parse(response.body)
+    end
+
+    private def try_refresh : Bool
+      creds = Config.load_credentials
+      return false unless rt = creds.refresh_token
+
+      config = Config.load_config
+      headers = HTTP::Headers{"Content-Type" => "application/json", "Accept" => "application/json"}
+      body = {refresh_token: rt}.to_json
+      response = HTTP::Client.post("#{config.base_url}/api/cli_auth/refresh", headers: headers, body: body)
+      return false unless response.success?
+
+      data = JSON.parse(response.body)
+      new_creds = Credentials.new(
+        access_token: data["token"].as_s,
+        refresh_token: data["refresh_token"]?.try(&.as_s),
+        email: creds.email,
+        default_company_id: creds.default_company_id,
+      )
+      Config.save_credentials(new_creds)
+      true
     end
   end
 
@@ -158,6 +186,7 @@ module Enable
         when "resolved"
           creds = Credentials.new(
             access_token: result["token"].as_s,
+            refresh_token: result["refresh_token"]?.try(&.as_s),
             email: result["email"]?.try(&.as_s),
           )
           Config.save_credentials(creds)
