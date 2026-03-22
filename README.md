@@ -1,6 +1,6 @@
 # enbl
 
-Command-line interface for the [Enable](https://enable.aluminumio.com) AI workforce platform. Provides human and machine-readable (JSON) access to companies, contracts, tasks, approvals, activity, and profiles.
+Command-line interface for the [Enable](https://app.enable.io) AI workforce platform. Provides human and machine-readable (JSON) access to companies, contracts, tasks, approvals, activity, and profiles.
 
 ## Install
 

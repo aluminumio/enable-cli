@@ -1,7 +1,7 @@
 name: enbl
 version: 0.3.1
 authors:
-  - Aluminum <admin@aluminumio.com>
+  - usiegj00 <248302+usiegj00@users.noreply.github.com>
 targets:
   enbl:
     main: src/enable.cr
