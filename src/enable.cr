@@ -3,7 +3,7 @@ require "json"
 require "option_parser"
 
 module Enable
-  VERSION = "0.3.1"
+  VERSION = "0.3.2"
 
   CONFIG_DIR  = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
@@ -131,7 +131,7 @@ module Enable
       data = JSON.parse(response.body)
       new_creds = Credentials.new(
         access_token: data["token"].as_s,
-        refresh_token: data["refresh_token"]?.try(&.as_s),
+        refresh_token: data["refresh_token"]?.try(&.as_s?),
         email: creds.email,
         default_company_id: creds.default_company_id,
       )
@@ -186,7 +186,7 @@ module Enable
         when "resolved"
           creds = Credentials.new(
             access_token: result["token"].as_s,
-            refresh_token: result["refresh_token"]?.try(&.as_s),
+            refresh_token: result["refresh_token"]?.try(&.as_s?),
             email: result["email"]?.try(&.as_s),
           )
           Config.save_credentials(creds)
