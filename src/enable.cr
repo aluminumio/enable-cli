@@ -3,7 +3,7 @@ require "json"
 require "option_parser"
 
 module Enable
-  VERSION = "0.1.0"
+  VERSION = "0.3.1"
 
   CONFIG_DIR  = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
