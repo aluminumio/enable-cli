@@ -3,7 +3,7 @@ require "json"
 require "option_parser"
 
 module Enable
-  VERSION = "0.4.0"
+  VERSION = "0.5.0"
 
   CONFIG_DIR  = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
@@ -32,6 +32,10 @@ module Enable
     extend self
 
     def load_config : AppConfig
+      # ENABLE_API env var overrides config file
+      if env_url = ENV["ENABLE_API"]?
+        return AppConfig.new(base_url: env_url)
+      end
       if File.exists?(CONFIG_FILE)
         AppConfig.from_json(File.read(CONFIG_FILE))
       else
@@ -279,6 +283,36 @@ module Enable
     end
   end
 
+  def self.cmd_me(contract_id : String? = nil)
+    # Use ENABLE_CONTRACT_ID from env if not provided
+    cid = contract_id || ENV["ENABLE_CONTRACT_ID"]?
+    params = {} of String => String
+    params["contract_id"] = cid if cid
+    data = API.get("/api/v1/me", params)
+    if Output.json_mode?
+      Output.json(data)
+    else
+      if cid
+        Output.record([
+          {"Contract", data["contract_id"].as_s[0..7]},
+          {"Company", "#{data["company_name"]} (#{data["company_id"].as_s[0..7]})"},
+          {"Role", data["role"]?.try(&.as_s) || ""},
+          {"Status", data["status"].as_s},
+          {"Name", data["name"]?.try(&.as_s) || ""},
+          {"Email", data["email"]?.try(&.as_s) || ""},
+          {"Manager", data["manager_id"]?.try(&.as_s.try { |s| s[0..7] }) || "(none)"},
+        ])
+      else
+        puts "User: #{data["email"]}"
+        companies = data["companies"].as_a
+        puts "Companies: #{companies.size}"
+        companies.each do |c|
+          puts "  #{c["name"]} (#{c["id"]})"
+        end
+      end
+    end
+  end
+
   def self.cmd_companies_list
     data = API.get("/api/v1/companies")
     if Output.json_mode?
@@ -309,6 +343,10 @@ module Enable
 
   def self.resolve_company(company_flag : String?) : String
     if cid = company_flag
+      return cid
+    end
+    # Check ENABLE_COMPANY_ID env var
+    if cid = ENV["ENABLE_COMPANY_ID"]?
       return cid
     end
     creds = Config.load_credentials
@@ -405,6 +443,66 @@ module Enable
     end
   end
 
+  def self.cmd_tasks_create(company_id : String, title : String, description : String? = nil,
+                            assignee_id : String? = nil, priority : String? = nil,
+                            parent_id : String? = nil, creator_contract_id : String? = nil)
+    body = JSON.build do |json|
+      json.object do
+        json.field "task" do
+          json.object do
+            json.field "title", title
+            json.field "description", description if description
+            json.field "assignee_id", assignee_id if assignee_id
+            json.field "priority", priority if priority
+            json.field "parent_id", parent_id if parent_id
+            json.field "creator_contract_id", creator_contract_id if creator_contract_id
+          end
+        end
+      end
+    end
+    data = API.post("/api/v1/companies/#{company_id}/tasks", body)
+    if Output.json_mode?
+      Output.json(data)
+    else
+      puts "Created task #{data["id"].as_s[0..7]}: #{data["title"]}"
+    end
+  end
+
+  def self.cmd_tasks_update(company_id : String, id : String, updates : Hash(String, String))
+    body = JSON.build do |json|
+      json.object do
+        json.field "task" do
+          json.object do
+            updates.each { |k, v| json.field k, v }
+          end
+        end
+      end
+    end
+    data = API.patch("/api/v1/companies/#{company_id}/tasks/#{id}", body)
+    if Output.json_mode?
+      Output.json(data)
+    else
+      puts "Updated task #{data["id"].as_s[0..7]}: #{data["title"]}"
+    end
+  end
+
+  def self.cmd_tasks_comment(company_id : String, id : String, body_text : String, contract_id : String? = nil)
+    cid = contract_id || ENV["ENABLE_CONTRACT_ID"]?
+    payload = JSON.build do |json|
+      json.object do
+        json.field "body", body_text
+        json.field "contract_id", cid if cid
+      end
+    end
+    data = API.post("/api/v1/companies/#{company_id}/tasks/#{id}/comment", payload)
+    if Output.json_mode?
+      Output.json(data)
+    else
+      count = data["comments"]?.try(&.as_a.size) || 0
+      puts "Comment added (#{count} total)."
+    end
+  end
+
   def self.cmd_approvals_list(company_id : String, params = {} of String => String)
     data = API.get("/api/v1/companies/#{company_id}/approvals", params)
     if Output.json_mode?
@@ -471,16 +569,18 @@ module Enable
   module Executor
     extend self
 
-    def run(company_id : String, task_id : String)
+    def run(task_id : String)
       STDERR.puts "Fetching execution payload for #{task_id[0..7]}..."
-      payload = API.get("/api/v1/companies/#{company_id}/tasks/#{task_id}/execution")
+      payload = API.get("/api/v1/executions/#{task_id}")
 
       prompt = payload["prompt"]?.try(&.as_s)
       unless prompt
-        STDERR.puts "No execution prompt — task may not be locked for execution."
+        STDERR.puts "No execution prompt — task may not be ready."
         exit 1
       end
 
+      contract_id = payload["contract_id"]?.try(&.as_s)
+      company_id = payload["company_id"]?.try(&.as_s)
       runtime = payload["runtime"]?.try(&.as_s) || "claude-code"
       budget = payload.dig?("config", "budget").try(&.as_s) || "2.00"
       session_id = payload.dig?("config", "session_id").try(&.as_s)
@@ -491,15 +591,17 @@ module Enable
 
       case runtime
       when "claude-code"
-        run_claude(company_id, task_id, prompt, budget, session_id)
+        run_claude(task_id, prompt, budget, session_id,
+          contract_id: contract_id, company_id: company_id)
       else
         STDERR.puts "Unknown runtime: #{runtime}"
-        post_complete(company_id, task_id, status: "failed", output: "Unknown runtime: #{runtime}")
+        post_complete(task_id, status: "failed", output: "Unknown runtime: #{runtime}")
         exit 1
       end
     end
 
-    private def run_claude(company_id : String, task_id : String, prompt : String, budget : String, session_id : String?)
+    private def run_claude(task_id : String, prompt : String, budget : String, session_id : String?,
+                           contract_id : String? = nil, company_id : String? = nil)
       args = ["--print", "--output-format", "json", "--dangerously-skip-permissions", "--max-budget-usd", budget]
       if sid = session_id
         args.push("--resume", sid, "-p", prompt)
@@ -508,6 +610,15 @@ module Enable
       end
 
       STDERR.puts "Running: claude #{args[0..5].join(" ")}..."
+
+      # Build env with ENABLE_* vars
+      env = {} of String => String
+      env["ENABLE_TASK_ID"] = task_id
+      env["ENABLE_CONTRACT_ID"] = contract_id if contract_id
+      env["ENABLE_COMPANY_ID"] = company_id if company_id
+      if api_url = ENV["ENABLE_API"]?
+        env["ENABLE_API"] = api_url
+      end
 
       output = IO::Memory.new
       status : Process::Status? = nil
@@ -519,7 +630,7 @@ module Enable
           unless completed
             completed = true
             STDERR.puts "\nCaught SIG{{ sig.id }} — sending failure completion..."
-            post_complete(company_id, task_id,
+            post_complete(task_id,
               status: "failed",
               output: output.to_s.presence || "Killed by SIG{{ sig.id }}")
           end
@@ -528,11 +639,11 @@ module Enable
       {% end %}
 
       begin
-        status = Process.run("claude", args, output: output, error: STDERR)
+        status = Process.run("claude", args, output: output, error: STDERR, env: env)
       rescue ex
         unless completed
           completed = true
-          post_complete(company_id, task_id, status: "failed", output: "Process error: #{ex.message}")
+          post_complete(task_id, status: "failed", output: "Process error: #{ex.message}")
         end
         STDERR.puts "Execution failed: #{ex.message}"
         exit 1
@@ -557,7 +668,7 @@ module Enable
         end
 
         STDERR.puts "Execution completed. Posting results..."
-        post_complete(company_id, task_id,
+        post_complete(task_id,
           status: "done",
           output: raw,
           session_id: s_id,
@@ -565,12 +676,12 @@ module Enable
         puts raw unless Output.quiet_mode?
       else
         STDERR.puts "Claude exited with #{status.try(&.exit_code) || "unknown"}"
-        post_complete(company_id, task_id, status: "failed", output: raw.presence || "Non-zero exit")
+        post_complete(task_id, status: "failed", output: raw.presence || "Non-zero exit")
         exit 1
       end
     end
 
-    def post_complete(company_id : String, task_id : String, status : String, output : String,
+    def post_complete(task_id : String, status : String, output : String,
                       session_id : String? = nil, stats = {} of String => JSON::Any)
       body = JSON.build do |json|
         json.object do
@@ -586,7 +697,7 @@ module Enable
       end
 
       begin
-        API.post("/api/v1/companies/#{company_id}/tasks/#{task_id}/complete", body)
+        API.post("/api/v1/executions/#{task_id}/complete", body)
         STDERR.puts "Completion posted (#{status})."
       rescue ex
         STDERR.puts "WARNING: Failed to post completion: #{ex.message}"
@@ -607,6 +718,9 @@ remaining_args = [] of String
 assignee_flag : String? = nil
 status_flag : String? = nil
 priority_flag : String? = nil
+title_flag : String? = nil
+description_flag : String? = nil
+parent_flag : String? = nil
 
 OptionParser.parse(ARGV) do |parser|
   parser.on("-c COMPANY", "--company=COMPANY", "Company ID") { |v| company_flag = v }
@@ -617,6 +731,9 @@ OptionParser.parse(ARGV) do |parser|
   parser.on("--assignee=ID", "Filter by assignee") { |v| assignee_flag = v }
   parser.on("--status=STATUS", "Filter by status") { |v| status_flag = v }
   parser.on("--priority=PRIORITY", "Filter by priority") { |v| priority_flag = v }
+  parser.on("--title=TITLE", "Task title") { |v| title_flag = v }
+  parser.on("--description=DESC", "Task description") { |v| description_flag = v }
+  parser.on("--parent=ID", "Parent task ID") { |v| parent_flag = v }
   parser.on("--version", "Show version") { puts "enbl #{Enable::VERSION}"; exit 0 }
   parser.on("-h", "--help", "Show help") { command = "help" }
   parser.unknown_args do |args|
@@ -651,6 +768,7 @@ begin
       login                  Authenticate via browser (OAuth device flow)
       logout                 Clear stored credentials
       status                 Show current user and companies
+      me                     Who am I? (identity + contract info)
 
       companies              List your companies
       companies:show <id>    Show company details
@@ -660,6 +778,9 @@ begin
 
       tasks                  List tasks
       tasks:show <id>        Task details with subtasks
+      tasks:create           Create a task (--title, --description, --assignee, --priority)
+      tasks:update <id>      Update a task (--title, --status, --assignee, --priority, --description)
+      tasks:comment <id>     Add a comment to a task (message as remaining args)
 
       approvals              List approvals
       approvals:show <id>    Approval details
@@ -670,22 +791,33 @@ begin
       execute <task-id>      Execute a task (kubelet-style runner)
 
     FLAGS
-      -c, --company=ID       Company ID (defaults to sole/primary company)
+      -c, --company=ID       Company ID (defaults to ENABLE_COMPANY_ID or sole company)
       --json                 JSON output
       -n, --limit=N          Max results (default 25)
       -q, --quiet            Minimal output
       -v, --verbose          Verbose output
 
-    TASK FILTERS
-      --assignee=ID          Filter by assignee contract ID
-      --status=STATUS        Filter by status
-      --priority=PRIORITY    Filter by priority
+    TASK FLAGS
+      --title=TITLE          Task title (create/update)
+      --description=DESC     Task description (create/update)
+      --assignee=ID          Assignee contract ID (filter/create/update)
+      --status=STATUS        Task status (filter/update)
+      --priority=PRIORITY    Task priority (filter/create/update)
+      --parent=ID            Parent task ID (create)
+
+    ENVIRONMENT
+      ENABLE_API             Base URL override (e.g. http://localhost:3000)
+      ENABLE_CONTRACT_ID     Default contract identity (set by provisioning)
+      ENABLE_COMPANY_ID      Default company (set by provisioning)
+      ENABLE_TASK_ID         Current task (set by executor)
 
     EXAMPLES
-      enbl login
-      enbl tasks --status=in_progress --assignee=<id>
-      enbl tasks:show <id> --json
-      enbl contracts -c <company-id>
+      enbl me
+      enbl tasks --status=todo --assignee=<id>
+      enbl tasks:create --title="Fix login bug" --assignee=<id>
+      enbl tasks:update <id> --status=done
+      enbl tasks:comment <id> Found the root cause in auth.rb
+      enbl execute <task-id>
     HELP
   when "login"
     Enable::Auth.login
@@ -693,6 +825,9 @@ begin
     Enable::Auth.logout
   when "status"
     Enable.cmd_status
+  when "me"
+    contract_id = remaining_args[0]?
+    Enable.cmd_me(contract_id)
   when "companies:list"
     Enable.cmd_companies_list
   when "companies:show"
@@ -718,6 +853,43 @@ begin
     cid = Enable.resolve_company(company_flag)
     id = remaining_args[0]? || (STDERR.puts "Usage: enbl tasks:show <id>"; exit 1)
     Enable.cmd_tasks_show(cid, id)
+  when "tasks:create"
+    cid = Enable.resolve_company(company_flag)
+    t = title_flag
+    unless t
+      STDERR.puts "Usage: enbl tasks:create --title=\"...\""
+      exit 1
+    end
+    creator_cid = ENV["ENABLE_CONTRACT_ID"]?
+    Enable.cmd_tasks_create(cid, t,
+      description: description_flag,
+      assignee_id: assignee_flag,
+      priority: priority_flag,
+      parent_id: parent_flag,
+      creator_contract_id: creator_cid)
+  when "tasks:update"
+    cid = Enable.resolve_company(company_flag)
+    id = remaining_args[0]? || (STDERR.puts "Usage: enbl tasks:update <id> [--status=X --title=X ...]"; exit 1)
+    updates = {} of String => String
+    updates["title"] = title_flag.not_nil! if title_flag
+    updates["description"] = description_flag.not_nil! if description_flag
+    updates["status"] = status_flag.not_nil! if status_flag
+    updates["priority"] = priority_flag.not_nil! if priority_flag
+    updates["assignee_id"] = assignee_flag.not_nil! if assignee_flag
+    if updates.empty?
+      STDERR.puts "Nothing to update. Use --status, --title, --description, --priority, or --assignee."
+      exit 1
+    end
+    Enable.cmd_tasks_update(cid, id, updates)
+  when "tasks:comment"
+    cid = Enable.resolve_company(company_flag)
+    id = remaining_args.shift? || (STDERR.puts "Usage: enbl tasks:comment <id> <message>"; exit 1)
+    body = remaining_args.join(" ")
+    if body.empty?
+      STDERR.puts "Usage: enbl tasks:comment <id> <message>"
+      exit 1
+    end
+    Enable.cmd_tasks_comment(cid, id, body)
   when "approvals:list"
     cid = Enable.resolve_company(company_flag)
     params = {"per_page" => limit_flag}
@@ -733,9 +905,8 @@ begin
   when "profiles:list"
     Enable.cmd_profiles_list({"per_page" => limit_flag})
   when "execute"
-    cid = Enable.resolve_company(company_flag)
     id = remaining_args[0]? || (STDERR.puts "Usage: enbl execute <task-id>"; exit 1)
-    Enable::Executor.run(cid, id)
+    Enable::Executor.run(id)
   else
     STDERR.puts "Unknown command: #{command}. Run: enbl --help"
     exit 1
