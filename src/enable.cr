@@ -3,7 +3,7 @@ require "json"
 require "option_parser"
 
 module Enable
-  VERSION = "0.3.2"
+  VERSION = "0.4.0"
 
   CONFIG_DIR  = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
@@ -465,6 +465,134 @@ module Enable
       Output.table(["ID", "NAME", "LOCATION", "MODEL"], rows)
     end
   end
+
+  # ---- Executor ----
+
+  module Executor
+    extend self
+
+    def run(company_id : String, task_id : String)
+      STDERR.puts "Fetching execution payload for #{task_id[0..7]}..."
+      payload = API.get("/api/v1/companies/#{company_id}/tasks/#{task_id}/execution")
+
+      prompt = payload["prompt"]?.try(&.as_s)
+      unless prompt
+        STDERR.puts "No execution prompt — task may not be locked for execution."
+        exit 1
+      end
+
+      runtime = payload["runtime"]?.try(&.as_s) || "claude-code"
+      budget = payload.dig?("config", "budget").try(&.as_s) || "2.00"
+      session_id = payload.dig?("config", "session_id").try(&.as_s)
+      title = payload["title"]?.try(&.as_s) || task_id
+
+      STDERR.puts "Task: #{title}"
+      STDERR.puts "Runtime: #{runtime} | Budget: $#{budget}"
+
+      case runtime
+      when "claude-code"
+        run_claude(company_id, task_id, prompt, budget, session_id)
+      else
+        STDERR.puts "Unknown runtime: #{runtime}"
+        post_complete(company_id, task_id, status: "failed", output: "Unknown runtime: #{runtime}")
+        exit 1
+      end
+    end
+
+    private def run_claude(company_id : String, task_id : String, prompt : String, budget : String, session_id : String?)
+      args = ["--print", "--output-format", "json", "--dangerously-skip-permissions", "--max-budget-usd", budget]
+      if sid = session_id
+        args.push("--resume", sid, "-p", prompt)
+      else
+        args.push("-p", prompt)
+      end
+
+      STDERR.puts "Running: claude #{args[0..5].join(" ")}..."
+
+      output = IO::Memory.new
+      status : Process::Status? = nil
+
+      # Trap signals — always POST completion
+      completed = false
+      {% for sig in ["INT", "TERM"] %}
+        Signal::{{ sig.id }}.trap do
+          unless completed
+            completed = true
+            STDERR.puts "\nCaught SIG{{ sig.id }} — sending failure completion..."
+            post_complete(company_id, task_id,
+              status: "failed",
+              output: output.to_s.presence || "Killed by SIG{{ sig.id }}")
+          end
+          exit 1
+        end
+      {% end %}
+
+      begin
+        status = Process.run("claude", args, output: output, error: STDERR)
+      rescue ex
+        unless completed
+          completed = true
+          post_complete(company_id, task_id, status: "failed", output: "Process error: #{ex.message}")
+        end
+        STDERR.puts "Execution failed: #{ex.message}"
+        exit 1
+      end
+
+      raw = output.to_s
+      completed = true
+
+      if status.try(&.success?)
+        # Parse stats from JSON output
+        stats = {} of String => JSON::Any
+        s_id : String? = nil
+        begin
+          parsed = JSON.parse(raw)
+          s_id = parsed["session_id"]?.try(&.as_s)
+          {"total_cost_usd", "duration_ms", "num_turns"}.each do |k|
+            if v = parsed[k]?
+              stats[k] = v
+            end
+          end
+        rescue
+        end
+
+        STDERR.puts "Execution completed. Posting results..."
+        post_complete(company_id, task_id,
+          status: "done",
+          output: raw,
+          session_id: s_id,
+          stats: stats)
+        puts raw unless Output.quiet_mode?
+      else
+        STDERR.puts "Claude exited with #{status.try(&.exit_code) || "unknown"}"
+        post_complete(company_id, task_id, status: "failed", output: raw.presence || "Non-zero exit")
+        exit 1
+      end
+    end
+
+    def post_complete(company_id : String, task_id : String, status : String, output : String,
+                      session_id : String? = nil, stats = {} of String => JSON::Any)
+      body = JSON.build do |json|
+        json.object do
+          json.field "output", output
+          json.field "status", status
+          json.field "session_id", session_id if session_id
+          json.field "stats" do
+            json.object do
+              stats.each { |k, v| json.field k, v }
+            end
+          end
+        end
+      end
+
+      begin
+        API.post("/api/v1/companies/#{company_id}/tasks/#{task_id}/complete", body)
+        STDERR.puts "Completion posted (#{status})."
+      rescue ex
+        STDERR.puts "WARNING: Failed to post completion: #{ex.message}"
+      end
+    end
+  end
 end
 
 # ---- Main ----
@@ -539,6 +667,8 @@ begin
       activity               Recent activity feed
       profiles               List agent profiles
 
+      execute <task-id>      Execute a task (kubelet-style runner)
+
     FLAGS
       -c, --company=ID       Company ID (defaults to sole/primary company)
       --json                 JSON output
@@ -602,6 +732,10 @@ begin
     Enable.cmd_activity_list(cid, {"per_page" => limit_flag})
   when "profiles:list"
     Enable.cmd_profiles_list({"per_page" => limit_flag})
+  when "execute"
+    cid = Enable.resolve_company(company_flag)
+    id = remaining_args[0]? || (STDERR.puts "Usage: enbl execute <task-id>"; exit 1)
+    Enable::Executor.run(cid, id)
   else
     STDERR.puts "Unknown command: #{command}. Run: enbl --help"
     exit 1
