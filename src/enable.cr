@@ -3,7 +3,7 @@ require "json"
 require "option_parser"
 
 module Enable
-  VERSION = "0.5.0"
+  VERSION = "0.5.1"
 
   CONFIG_DIR  = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
@@ -573,18 +573,18 @@ module Enable
       STDERR.puts "Fetching execution payload for #{task_id[0..7]}..."
       payload = API.get("/api/v1/executions/#{task_id}")
 
-      prompt = payload["prompt"]?.try(&.as_s)
+      prompt = payload["prompt"]?.try(&.as_s?)
       unless prompt
         STDERR.puts "No execution prompt — task may not be ready."
         exit 1
       end
 
-      contract_id = payload["contract_id"]?.try(&.as_s)
-      company_id = payload["company_id"]?.try(&.as_s)
-      runtime = payload["runtime"]?.try(&.as_s) || "claude-code"
-      budget = payload.dig?("config", "budget").try(&.as_s) || "2.00"
-      session_id = payload.dig?("config", "session_id").try(&.as_s)
-      title = payload["title"]?.try(&.as_s) || task_id
+      contract_id = payload["contract_id"]?.try(&.as_s?)
+      company_id = payload["company_id"]?.try(&.as_s?)
+      runtime = payload["runtime"]?.try(&.as_s?) || "claude-code"
+      budget = payload.dig?("config", "budget").try(&.as_s?) || "2.00"
+      session_id = payload.dig?("config", "session_id").try(&.as_s?)
+      title = payload["title"]?.try(&.as_s?) || task_id
 
       STDERR.puts "Task: #{title}"
       STDERR.puts "Runtime: #{runtime} | Budget: $#{budget}"
@@ -724,7 +724,7 @@ parent_flag : String? = nil
 
 OptionParser.parse(ARGV) do |parser|
   parser.on("-c COMPANY", "--company=COMPANY", "Company ID") { |v| company_flag = v }
-  parser.on("--json", "JSON output") { json_flag = true }
+  parser.on("-j", "--json", "JSON output") { json_flag = true }
   parser.on("-q", "--quiet", "Minimal output") { quiet_flag = true }
   parser.on("-n LIMIT", "--limit=LIMIT", "Max results") { |v| limit_flag = v }
   parser.on("-v", "--verbose", "Verbose output") { verbose_flag = true }
