@@ -44,6 +44,10 @@ module Enable
     end
 
     def load_credentials : Credentials
+      # ENABLE_TOKEN env var for headless/execution contexts (contract-scoped tokens)
+      if env_token = ENV["ENABLE_TOKEN"]?
+        return Credentials.new(access_token: env_token)
+      end
       unless File.exists?(CREDENTIALS_FILE)
         STDERR.puts "Not logged in. Run: enbl login"
         exit 1
