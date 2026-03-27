@@ -3,11 +3,11 @@ require "json"
 require "option_parser"
 
 module Enable
-  VERSION = "0.5.1"
+  VERSION = "0.5.3"
 
-  CONFIG_DIR  = Path.home / ".config" / "enable"
+  CONFIG_DIR       = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
-  CONFIG_FILE = CONFIG_DIR / "config.json"
+  CONFIG_FILE      = CONFIG_DIR / "config.json"
 
   struct Credentials
     include JSON::Serializable
@@ -107,14 +107,13 @@ module Enable
                  else               raise "Unknown method: #{method}"
                  end
 
-      if response.status_code == 401 && !retried
-        if try_refresh
+      if response.status_code == 401
+        if ENV["ENABLE_TOKEN"]?
+          raise AuthError.new("ENABLE_TOKEN rejected (401). Check that the token is valid.")
+        end
+        if !retried && try_refresh
           return request(method, path, params, body, retried: true)
         end
-        raise AuthError.new("Session expired. Run: enbl login")
-      end
-
-      if response.status_code == 401
         raise AuthError.new("Session expired. Run: enbl login")
       end
 
