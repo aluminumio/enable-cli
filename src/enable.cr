@@ -3,7 +3,7 @@ require "json"
 require "option_parser"
 
 module Enable
-  VERSION = "0.5.3"
+  VERSION = "0.6.0"
 
   CONFIG_DIR       = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
@@ -532,6 +532,10 @@ module Enable
         {"Requester", requester.try { |r| r["name"]?.try(&.as_s) } || ""},
         {"Created", data["created_at"].as_s[0..9]},
       ])
+      if payload = data["payload"]?
+        puts "\nPayload:"
+        puts payload.to_pretty_json
+      end
       if comments = data["comments"]?.try(&.as_a)
         unless comments.empty?
           puts "\nComments:"
@@ -540,6 +544,34 @@ module Enable
           end
         end
       end
+    end
+  end
+
+  def self.cmd_approvals_approve(company_id : String, id : String, note : String? = nil)
+    body = JSON.build do |json|
+      json.object do
+        json.field "note", note if note
+      end
+    end
+    data = API.post("/api/v1/companies/#{company_id}/approvals/#{id}/approve", body)
+    if Output.json_mode?
+      Output.json(data)
+    else
+      puts "Approved #{data["id"].as_s[0..7]} (#{data["gate_type"]})"
+    end
+  end
+
+  def self.cmd_approvals_reject(company_id : String, id : String, note : String? = nil)
+    body = JSON.build do |json|
+      json.object do
+        json.field "note", note if note
+      end
+    end
+    data = API.post("/api/v1/companies/#{company_id}/approvals/#{id}/reject", body)
+    if Output.json_mode?
+      Output.json(data)
+    else
+      puts "Rejected #{data["id"].as_s[0..7]} (#{data["gate_type"]})"
     end
   end
 
@@ -564,6 +596,65 @@ module Enable
         [p["id"].as_s[0..7], p["name"].as_s, p["location"]?.try(&.as_s) || "", p["ai_model"]?.try(&.as_s) || ""]
       end
       Output.table(["ID", "NAME", "LOCATION", "MODEL"], rows)
+    end
+  end
+
+  def self.cmd_profiles_show(id : String)
+    data = API.get("/api/v1/profiles/#{id}")
+    if Output.json_mode?
+      Output.json(data)
+    else
+      Output.record([
+        {"ID", data["id"].as_s},
+        {"Name", data["name"].as_s},
+        {"Location", data["location"]?.try(&.as_s) || ""},
+        {"Model", data["ai_model"]?.try(&.as_s) || ""},
+      ])
+      if desc = data["description"]?.try(&.as_s)
+        puts "\n#{desc}" unless desc.empty?
+      end
+      if bg = data["background"]?.try(&.as_s)
+        puts "\nBackground: #{bg}" unless bg.empty?
+      end
+      {"strengths", "weaknesses", "interests"}.each do |field|
+        if items = data[field]?.try(&.as_a)
+          unless items.empty?
+            puts "\n#{field.capitalize}: #{items.map(&.as_s).join(", ")}"
+          end
+        end
+      end
+    end
+  end
+
+  def self.cmd_conversations_list(company_id : String, params = {} of String => String)
+    data = API.get("/api/v1/companies/#{company_id}/conversations", params)
+    if Output.json_mode?
+      Output.json(data)
+    else
+      rows = data.as_a.map do |c|
+        [c["id"].as_s[0..7], c["subject"]?.try(&.as_s) || "", c["profile_name"]?.try(&.as_s) || "",
+         c["from"]?.try(&.as_s) || "", c["created_at"].as_s[0..9]]
+      end
+      Output.table(["ID", "SUBJECT", "AGENT", "FROM", "DATE"], rows)
+    end
+  end
+
+  def self.cmd_conversations_show(company_id : String, id : String)
+    data = API.get("/api/v1/companies/#{company_id}/conversations/#{id}")
+    if Output.json_mode?
+      Output.json(data)
+    else
+      Output.record([
+        {"ID", data["id"].as_s},
+        {"Subject", data["subject"]?.try(&.as_s) || ""},
+        {"Agent", data["profile_name"]?.try(&.as_s) || ""},
+        {"From", data["from"]?.try(&.as_s) || ""},
+        {"To", data["to"]?.try(&.as_s) || ""},
+        {"Date", data["created_at"].as_s[0..9]},
+      ])
+      if body = data["body"]?.try(&.as_s)
+        puts "\n#{body}" unless body.empty?
+      end
     end
   end
 
@@ -787,9 +878,16 @@ begin
 
       approvals              List approvals
       approvals:show <id>    Approval details
+      approvals:approve <id> Approve (optional note as remaining args)
+      approvals:reject <id>  Reject (optional note as remaining args)
 
       activity               Recent activity feed
+
       profiles               List agent profiles
+      profiles:show <id>     Profile details (strengths, background, etc.)
+
+      conversations          List conversations
+      conversations:show <id> Conversation details
 
       execute <task-id>      Execute a task (kubelet-style runner)
 
@@ -809,6 +907,7 @@ begin
       --parent=ID            Parent task ID (create)
 
     ENVIRONMENT
+      ENABLE_TOKEN           Bearer token (skips credentials file, for headless/CI)
       ENABLE_API             Base URL override (e.g. http://localhost:3000)
       ENABLE_CONTRACT_ID     Default contract identity (set by provisioning)
       ENABLE_COMPANY_ID      Default company (set by provisioning)
@@ -902,11 +1001,31 @@ begin
     cid = Enable.resolve_company(company_flag)
     id = remaining_args[0]? || (STDERR.puts "Usage: enbl approvals:show <id>"; exit 1)
     Enable.cmd_approvals_show(cid, id)
+  when "approvals:approve"
+    cid = Enable.resolve_company(company_flag)
+    id = remaining_args.shift? || (STDERR.puts "Usage: enbl approvals:approve <id> [note]"; exit 1)
+    note = remaining_args.join(" ").presence
+    Enable.cmd_approvals_approve(cid, id, note)
+  when "approvals:reject"
+    cid = Enable.resolve_company(company_flag)
+    id = remaining_args.shift? || (STDERR.puts "Usage: enbl approvals:reject <id> [note]"; exit 1)
+    note = remaining_args.join(" ").presence
+    Enable.cmd_approvals_reject(cid, id, note)
   when "activity:list"
     cid = Enable.resolve_company(company_flag)
     Enable.cmd_activity_list(cid, {"per_page" => limit_flag})
   when "profiles:list"
     Enable.cmd_profiles_list({"per_page" => limit_flag})
+  when "profiles:show"
+    id = remaining_args[0]? || (STDERR.puts "Usage: enbl profiles:show <id>"; exit 1)
+    Enable.cmd_profiles_show(id)
+  when "conversations:list"
+    cid = Enable.resolve_company(company_flag)
+    Enable.cmd_conversations_list(cid, {"per_page" => limit_flag})
+  when "conversations:show"
+    cid = Enable.resolve_company(company_flag)
+    id = remaining_args[0]? || (STDERR.puts "Usage: enbl conversations:show <id>"; exit 1)
+    Enable.cmd_conversations_show(cid, id)
   when "execute"
     id = remaining_args[0]? || (STDERR.puts "Usage: enbl execute <task-id>"; exit 1)
     Enable::Executor.run(id)
