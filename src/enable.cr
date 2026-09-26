@@ -4,7 +4,7 @@ require "option_parser"
 require "./enable/runtime"
 
 module Enable
-  VERSION = "0.7.0"
+  VERSION = "0.8.0"
 
   CONFIG_DIR       = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
@@ -723,7 +723,17 @@ module Enable
       {% end %}
 
       begin
-        status = Process.run(argv[0], argv[1..], output: output, error: IO::MultiWriter.new(STDERR, errors), env: env)
+        # Read the CLI's output as it comes: all of it is kept for the completion (and for a
+        # signal, which posts what was seen so far), and each line is shown in words, so the
+        # terminal and its recording follow the run while it works.
+        process = Process.new(argv[0], argv[1..], output: :pipe, error: IO::MultiWriter.new(STDERR, errors), env: env)
+        process.output.each_line(chomp: false) do |line|
+          output << line
+          next if Output.quiet_mode?
+          Runtime.describe(runtime, line, secrets).each { |shown| puts shown }
+          STDOUT.flush
+        end
+        status = process.wait
       rescue ex
         unless completed
           completed = true

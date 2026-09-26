@@ -12,11 +12,11 @@ alias Runtime = Enable::Runtime
 
 describe Enable::Runtime do
   describe ".argv" do
-    it "keeps claude-code as it was, with the prompt last" do
+    it "streams claude-code's events, with the prompt last" do
       Runtime.argv("claude-code", "do it", "2.00").should eq(
-        ["claude", "--print", "--output-format", "json", "--dangerously-skip-permissions", "--max-budget-usd", "2.00", "-p", "do it"])
+        ["claude", "--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "--max-budget-usd", "2.00", "-p", "do it"])
       Runtime.argv("claude-code", "do it", "1.50", "sess-1").should eq(
-        ["claude", "--print", "--output-format", "json", "--dangerously-skip-permissions", "--max-budget-usd", "1.50",
+        ["claude", "--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "--max-budget-usd", "1.50",
          "--resume", "sess-1", "-p", "do it"])
     end
 
@@ -87,6 +87,21 @@ describe Enable::Runtime do
       r.stats.should eq({"total_cost_usd" => JSON::Any.new(0.0421), "duration_ms" => JSON::Any.new(4210_i64), "num_turns" => JSON::Any.new(3_i64)})
     end
 
+    it "posts the same completion for a streamed claude-code run: its result event, session id and stats" do
+      r = Runtime.result("claude-code", fixture("claude_stream_ok.jsonl"), 0)
+      r.status.should eq("done")
+      r.output.should eq(fixture("claude_ok.json").strip)
+      r.session_id.should eq("0b3c2c55-5f7e-4a44-9d51-2f5d0c7f1a11")
+      r.stats.should eq({"total_cost_usd" => JSON::Any.new(0.0421), "duration_ms" => JSON::Any.new(4210_i64), "num_turns" => JSON::Any.new(3_i64)})
+    end
+
+    it "posts everything a streamed claude-code run printed when it never reached its result" do
+      stream = fixture("claude_stream_ok.jsonl").lines[0..2].join
+      r = Runtime.result("claude-code", stream, 1)
+      r.status.should eq("failed")
+      r.output.should eq(stream)
+    end
+
     it "reads a codex run whose turn completed as done, with no stats or session" do
       r = Runtime.result("codex", fixture("codex_ok.jsonl"), 0)
       r.status.should eq("done")
@@ -133,6 +148,34 @@ describe Enable::Runtime do
       r.status.should eq("failed")
       r.output.should contain("Authentication required")
       Runtime.result("grok", "", nil).output.should eq("grok exited with unknown and printed nothing")
+    end
+  end
+
+  describe ".describe" do
+    it "turns claude-code's events into short lines while the run works, and hides secrets" do
+      lines = fixture("claude_stream_ok.jsonl").lines.flat_map { |l| Runtime.describe("claude-code", l, ["ghs_abcdefgh12345678"]) }
+      lines.should eq([
+        "Session started (claude-sonnet-5)",
+        "I will look at the failing spec first.",
+        "→ Bash: Run the task spec",
+        "← 3 examples, 1 failure",
+        "← error: No such file: GH_TOKEN=[hidden]",
+        "Done.",
+        "Finished: 3 turns, $0.0421, 4.2s",
+      ])
+    end
+
+    it "keeps each line short and on one line" do
+      long = %({"type":"assistant","message":{"content":[{"type":"text","text":"#{"a" * 500}\nsecond"}]}})
+      line = Runtime.describe("claude-code", long).first
+      line.size.should be <= Runtime::LINE
+      line.should_not contain("\n")
+    end
+
+    it "shows the other runtimes' lines as they come, trimmed, and skips blank ones" do
+      Runtime.describe("codex", %({"type":"turn.started"}\n)).should eq([%({"type":"turn.started"})])
+      Runtime.describe("grok", "   \n").should be_empty
+      Runtime.describe("agy", "key sk-abcdefgh99 printed").should eq(["key [hidden] printed"])
     end
   end
 end
