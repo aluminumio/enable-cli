@@ -14,6 +14,8 @@ module Enable
 
     NAMES = %w[claude-code codex cursor grok agy]
     STATS = %w[total_cost_usd duration_ms num_turns]
+    # How long one printed line of a running run may be.
+    LINE = 160
     # What looks like a key or token, for keys enbl does not know by name. Codex
     # prints a rejected key in its 401 message ("Incorrect API key provided: sk-...").
     TOKEN = /\b(?:sk-[\w-]{8,}|xai-[\w-]{8,}|key_[\w-]{8,}|AIza[\w-]{20,}|ya29\.[\w.-]+|eyJ[\w-]+\.[\w.-]+)/
@@ -28,7 +30,9 @@ module Enable
       model_flag = model.presence
       case runtime
       when "claude-code"
-        args = ["claude", "--print", "--output-format", "json", "--dangerously-skip-permissions", "--max-budget-usd", budget]
+        # stream-json prints each event as it happens, so a watcher sees the run while it works.
+        # Its last event is the object --output-format json printed, and that is what is posted.
+        args = ["claude", "--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "--max-budget-usd", budget]
         args.push("--resume", session_id) if session_id
         args.push("-p", prompt)
       when "codex"
@@ -79,7 +83,9 @@ module Enable
                secrets : Enumerable(String) = [] of String) : Result
       events = events(stdout)
       failed = exit_code != 0 || error?(runtime, events, exit_code)
-      output = stdout
+      # claude-code streams its events; Rails reads the result event, as it read the one object
+      # before. A run that never reached it posts all it printed.
+      output = (result_line(stdout) if runtime == "claude-code" && events.size > 1) || stdout
       if failed && output.blank?
         output = stderr.lines.last(20).join.presence || "#{runtime} exited with #{exit_code || "unknown"} and printed nothing"
       end
@@ -126,6 +132,72 @@ module Enable
       whole = object(text)
       return [whole] if whole
       text.each_line.compact_map { |line| object(line) }.to_a
+    end
+
+    # The lines to show for one line a CLI printed, while the run works: claude-code's events in
+    # words, the other CLIs' lines as they are. Secrets are hidden, and each line is short.
+    def describe(runtime : String, line : String, secrets : Enumerable(String) = [] of String) : Array(String)
+      text = line.strip
+      return [] of String if text.empty?
+      lines = runtime == "claude-code" ? claude_lines(text) : [text]
+      lines.compact_map { |l| short(redact(l, secrets)).presence }
+    end
+
+    private def claude_lines(text : String) : Array(String)
+      event = object(text)
+      return [text] unless event
+      case event["type"]?.try(&.as_s?)
+      when "system"
+        event["subtype"]? == "init" ? ["Session started (#{event["model"]? || "unknown model"})"] : [] of String
+      when "assistant"
+        content(event).compact_map do |part|
+          case part["type"]?.try(&.as_s?)
+          when "text"     then part["text"]?.try(&.as_s?)
+          when "tool_use" then "→ #{part["name"]? || "tool"}: #{tool_summary(part["input"]?)}"
+          end
+        end
+      when "user"
+        content(event).compact_map do |part|
+          next unless part["type"]? == "tool_result"
+          body = result_text(part["content"]?)
+          part["is_error"]? == true ? "← error: #{body}" : "← #{body}"
+        end
+      when "result"
+        seconds = event["duration_ms"]?.try(&.as_i64?).try { |ms| (ms / 1000.0).round(1) }
+        ["Finished: #{event["num_turns"]?} turns, $#{event["total_cost_usd"]?}, #{seconds}s"]
+      else
+        [] of String
+      end
+    end
+
+    private def content(event : JSON::Any) : Array(JSON::Any)
+      event.dig?("message", "content").try(&.as_a?) || [] of JSON::Any
+    end
+
+    # A tool call in a few words: its description, else its command or path, else its first value.
+    private def tool_summary(input : JSON::Any?) : String
+      hash = input.try(&.as_h?)
+      return "" unless hash
+      value = %w[description command file_path path pattern url].compact_map { |k| hash[k]?.try(&.as_s?) }.first? ||
+              hash.values.compact_map(&.as_s?).first?
+      value.to_s.lines.first? || ""
+    end
+
+    # The first line of what a tool returned: a string, or a list of text parts.
+    private def result_text(content : JSON::Any?) : String
+      text = content.try(&.as_s?) ||
+             content.try(&.as_a?).try(&.compact_map { |p| p["text"]?.try(&.as_s?) }.join(" ")) || ""
+      text.lines.first? || ""
+    end
+
+    private def short(text : String) : String
+      one = text.gsub(/\s+/, " ").strip
+      one.size > LINE ? "#{one[0, LINE - 1]}…" : one
+    end
+
+    # The last line that is claude-code's result event, as it was printed.
+    private def result_line(text : String) : String?
+      text.lines.reverse.find { |l| object(l).try(&.["type"]?) == "result" }.try(&.strip)
     end
 
     private def object(text : String) : JSON::Any?
