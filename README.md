@@ -53,6 +53,25 @@ TASK FILTERS
   --priority=PRIORITY    Filter by priority
 ```
 
+## Execute runtimes
+
+`enbl execute <task-id>` runs the CLI that the task's `runtime` names, then posts
+`{output, status, session_id?, stats}` to `POST /api/v1/executions/:id/complete`
+exactly once, also on SIGINT and SIGTERM. `enbl version` lists the runtimes.
+
+| runtime | command | failed when |
+|---|---|---|
+| `claude-code` | `claude --print --output-format json ...` | non-zero exit (Enable reads `is_error`) |
+| `codex` | `codex exec --json ...` | non-zero exit, or the last turn event is `turn.failed` |
+| `cursor` | `cursor-agent -p --output-format json ...` | non-zero exit, or `is_error: true` |
+| `grok` | `grok -p ... --output-format json` | non-zero exit, or a `"type":"error"` line |
+| `agy` | `agy -p ... --output-format json` | non-zero exit (3 included), or `"status":"ERROR"` |
+
+Enable sets each CLI's home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
+`GROK_HOME`, `HOME`) and key in the environment; the CLI inherits them. No key goes on
+a command line, and every `*KEY`, `*TOKEN` and `*SECRET` value is removed from the
+output before it is posted.
+
 ## Authentication
 
 `enbl login` starts an OAuth device flow: it opens your browser to authorize, then polls until you approve. The CLI stores the resulting token locally.
