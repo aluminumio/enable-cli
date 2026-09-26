@@ -35,7 +35,15 @@ describe Enable::Runtime do
     it "runs grok and agy with the prompt after -p" do
       Runtime.argv("grok", "do it").should eq(["grok", "-p", "do it", "--output-format", "json", "--always-approve"])
       Runtime.argv("agy", "do it", model: "g").should eq(
-        ["agy", "-p", "do it", "--output-format", "json", "--dangerously-skip-permissions", "--model", "g"])
+        Runtime::KEYRING_ARGV + ["agy", "-p", "do it", "--output-format", "json", "--dangerously-skip-permissions", "--model", "g"])
+    end
+
+    # agy keeps its Google login only in a Secret Service; the gem's adapter runs it in a
+    # D-Bus session of its own with a keyring under HOME, and a run must read the same one.
+    it "runs agy in a D-Bus session with its own keyring, as the gem's adapter does" do
+      Runtime::KEYRING_ARGV.first(4).should eq(["dbus-run-session", "--", "sh", "-c"])
+      Runtime::KEYRING_ARGV[4].should contain("gnome-keyring-daemon --daemonize --unlock --components=secrets")
+      Runtime::KEYRING_ARGV[4].should end_with(%(exec "$@"))
     end
 
     it "ignores a session id and an empty model for the other runtimes" do

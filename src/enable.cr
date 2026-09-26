@@ -4,7 +4,7 @@ require "option_parser"
 require "./enable/runtime"
 
 module Enable
-  VERSION = "0.8.0"
+  VERSION = "0.9.0"
 
   CONFIG_DIR       = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"

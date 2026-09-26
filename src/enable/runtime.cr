@@ -20,6 +20,13 @@ module Enable
     # prints a rejected key in its 401 message ("Incorrect API key provided: sk-...").
     TOKEN = /\b(?:sk-[\w-]{8,}|xai-[\w-]{8,}|key_[\w-]{8,}|AIza[\w-]{20,}|ya29\.[\w.-]+|eyJ[\w-]+\.[\w.-]+)/
 
+    # agy keeps its Google login only in a Secret Service on D-Bus. As the gem's agy
+    # adapter does, a run starts in a D-Bus session of its own with a gnome-keyring
+    # under HOME (the login file Enable restores), unlocked by a fixed password, then
+    # execs agy. Without gnome-keyring agy still runs: a key needs no keyring.
+    KEYRING      = %(if command -v gnome-keyring-daemon >/dev/null; then printf enable | gnome-keyring-daemon --daemonize --unlock --components=secrets >/dev/null 2>&1; else echo "gnome-keyring is not installed, so a Google sign-in to agy cannot be kept" >&2; fi; exec "$@")
+    KEYRING_ARGV = ["dbus-run-session", "--", "sh", "-c", KEYRING, "agy"]
+
     # The end of one run, as `POST /api/v1/executions/:id/complete` takes it.
     record Result, status : String, output : String, session_id : String?, stats : Hash(String, JSON::Any)
 
@@ -47,7 +54,7 @@ module Enable
         args = ["grok", "-p", prompt, "--output-format", "json", "--always-approve"]
         args.push("--model", model_flag) if model_flag
       when "agy"
-        args = ["agy", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"]
+        args = KEYRING_ARGV + ["agy", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"]
         args.push("--model", model_flag) if model_flag
       else
         raise ArgumentError.new("Unknown runtime: #{runtime}")
