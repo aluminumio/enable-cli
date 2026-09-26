@@ -20,6 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: aluminumio/install-crystal@master
+      - run: crystal tool format --check
+      - run: crystal spec
       - run: mkdir -p bin && crystal build src/enable.cr -o bin/${{ matrix.artifact }} --release --no-debug
       - uses: actions/upload-artifact@v7
         with:

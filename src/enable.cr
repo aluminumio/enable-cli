@@ -1,9 +1,10 @@
 require "http/client"
 require "json"
 require "option_parser"
+require "./enable/runtime"
 
 module Enable
-  VERSION = "0.6.0"
+  VERSION = "0.7.0"
 
   CONFIG_DIR       = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
@@ -683,38 +684,27 @@ module Enable
       STDERR.puts "Task: #{title}"
       STDERR.puts "Runtime: #{runtime} | Budget: $#{budget}"
 
-      case runtime
-      when "claude-code"
-        run_claude(task_id, prompt, budget, session_id,
-          contract_id: contract_id, company_id: company_id)
-      else
+      unless Runtime::NAMES.includes?(runtime)
         STDERR.puts "Unknown runtime: #{runtime}"
         post_complete(task_id, status: "failed", output: "Unknown runtime: #{runtime}")
         exit 1
       end
+
+      model = payload.dig?("config", "model").try(&.as_s?)
+      argv = Runtime.argv(runtime, prompt, budget, session_id, model)
+      STDERR.puts "Running: #{argv.map { |a| a == prompt ? "<prompt>" : a }.join(" ")}"
+      run_cli(task_id, runtime, argv, Runtime.env(runtime, task_id, contract_id, company_id))
     end
 
-    private def run_claude(task_id : String, prompt : String, budget : String, session_id : String?,
-                           contract_id : String? = nil, company_id : String? = nil)
-      args = ["--print", "--output-format", "json", "--dangerously-skip-permissions", "--max-budget-usd", budget]
-      if sid = session_id
-        args.push("--resume", sid, "-p", prompt)
-      else
-        args.push("-p", prompt)
-      end
-
-      STDERR.puts "Running: claude #{args[0..5].join(" ")}..."
-
-      # Build env with ENABLE_* vars
-      env = {} of String => String
-      env["ENABLE_TASK_ID"] = task_id
-      env["ENABLE_CONTRACT_ID"] = contract_id if contract_id
-      env["ENABLE_COMPANY_ID"] = company_id if company_id
+    # Runs one CLI and posts its completion exactly once, also on SIGINT and SIGTERM.
+    private def run_cli(task_id : String, runtime : String, argv : Array(String), env : Hash(String, String))
       if api_url = ENV["ENABLE_API"]?
         env["ENABLE_API"] = api_url
       end
+      secrets = Runtime.secrets
 
       output = IO::Memory.new
+      errors = IO::Memory.new
       status : Process::Status? = nil
 
       # Trap signals — always POST completion
@@ -726,53 +716,34 @@ module Enable
             STDERR.puts "\nCaught SIG{{ sig.id }} — sending failure completion..."
             post_complete(task_id,
               status: "failed",
-              output: output.to_s.presence || "Killed by SIG{{ sig.id }}")
+              output: Runtime.redact(output.to_s.presence || "Killed by SIG{{ sig.id }}", secrets))
           end
           exit 1
         end
       {% end %}
 
       begin
-        status = Process.run("claude", args, output: output, error: STDERR, env: env)
+        status = Process.run(argv[0], argv[1..], output: output, error: IO::MultiWriter.new(STDERR, errors), env: env)
       rescue ex
         unless completed
           completed = true
-          post_complete(task_id, status: "failed", output: "Process error: #{ex.message}")
+          post_complete(task_id, status: "failed", output: Runtime.redact("Process error: #{ex.message}", secrets))
         end
         STDERR.puts "Execution failed: #{ex.message}"
         exit 1
       end
 
-      raw = output.to_s
       completed = true
-
-      if status.try(&.success?)
-        # Parse stats from JSON output
-        stats = {} of String => JSON::Any
-        s_id : String? = nil
-        begin
-          parsed = JSON.parse(raw)
-          s_id = parsed["session_id"]?.try(&.as_s)
-          {"total_cost_usd", "duration_ms", "num_turns"}.each do |k|
-            if v = parsed[k]?
-              stats[k] = v
-            end
-          end
-        rescue
-        end
-
+      result = Runtime.result(runtime, output.to_s, status.try(&.exit_code?), errors.to_s, secrets)
+      if result.status == "done"
         STDERR.puts "Execution completed. Posting results..."
-        post_complete(task_id,
-          status: "done",
-          output: raw,
-          session_id: s_id,
-          stats: stats)
-        puts raw unless Output.quiet_mode?
       else
-        STDERR.puts "Claude exited with #{status.try(&.exit_code) || "unknown"}"
-        post_complete(task_id, status: "failed", output: raw.presence || "Non-zero exit")
-        exit 1
+        STDERR.puts "#{argv[0]} reported a failure (exit #{status.try(&.exit_code?) || "unknown"})"
       end
+      post_complete(task_id, status: result.status, output: result.output,
+        session_id: result.session_id, stats: result.stats)
+      exit 1 unless result.status == "done"
+      puts result.output unless Output.quiet_mode?
     end
 
     def post_complete(task_id : String, status : String, output : String,
@@ -828,7 +799,7 @@ OptionParser.parse(ARGV) do |parser|
   parser.on("--title=TITLE", "Task title") { |v| title_flag = v }
   parser.on("--description=DESC", "Task description") { |v| description_flag = v }
   parser.on("--parent=ID", "Parent task ID") { |v| parent_flag = v }
-  parser.on("--version", "Show version") { puts "enbl #{Enable::VERSION}"; exit 0 }
+  parser.on("--version", "Show version") { command = "version" }
   parser.on("-h", "--help", "Show help") { command = "help" }
   parser.unknown_args do |args|
     remaining_args = args
@@ -890,6 +861,7 @@ begin
       conversations:show <id> Conversation details
 
       execute <task-id>      Execute a task (kubelet-style runner)
+      version                Version and the runtimes execute can run
 
     FLAGS
       -c, --company=ID       Company ID (defaults to ENABLE_COMPANY_ID or sole company)
@@ -921,6 +893,10 @@ begin
       enbl tasks:comment <id> Found the root cause in auth.rb
       enbl execute <task-id>
     HELP
+  when "version"
+    # Enable reads the runtimes line before it lets a task use one.
+    puts "enbl #{Enable::VERSION}"
+    puts "runtimes: #{Enable::Runtime::NAMES.join(" ")}"
   when "login"
     Enable::Auth.login
   when "logout"
