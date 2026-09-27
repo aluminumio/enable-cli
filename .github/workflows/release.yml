@@ -20,9 +20,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: aluminumio/install-crystal@master
+      # install-crystal points PKG_CONFIG_PATH at the first Cellar/openssl* it finds, which on
+      # macos-15 is openssl@1.1. Homebrew removed openssl@1.1, so a binary linked to it does not
+      # start. Link openssl@3, the one the formula depends on.
+      - if: runner.os == 'macOS'
+        run: echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
       - run: crystal tool format --check
       - run: crystal spec
       - run: mkdir -p bin && crystal build src/enable.cr -o bin/${{ matrix.artifact }} --release --no-debug
+      - if: runner.os == 'macOS'
+        run: |
+          otool -L bin/${{ matrix.artifact }}
+          if otool -L bin/${{ matrix.artifact }} | grep -q 'openssl@1'; then
+            echo "::error::bin/${{ matrix.artifact }} links openssl@1.1, which Homebrew no longer has"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
