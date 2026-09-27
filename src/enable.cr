@@ -4,7 +4,7 @@ require "option_parser"
 require "./enable/runtime"
 
 module Enable
-  VERSION = "0.9.0"
+  VERSION = "0.10.0"
 
   CONFIG_DIR       = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
@@ -709,14 +709,18 @@ module Enable
 
       # Trap signals — always POST completion
       completed = false
+      started = Time.utc
       {% for sig in ["INT", "TERM"] %}
         Signal::{{ sig.id }}.trap do
           unless completed
             completed = true
             STDERR.puts "\nCaught SIG{{ sig.id }} — sending failure completion..."
+            # What the run used so far, and how long it ran.
+            stats = Runtime.stats(Runtime.events(output.to_s))
+            stats["duration_ms"] ||= JSON::Any.new((Time.utc - started).total_milliseconds.to_i64)
             post_complete(task_id,
               status: "failed",
-              output: Runtime.redact(output.to_s.presence || "Killed by SIG{{ sig.id }}", secrets))
+              output: Runtime.redact(output.to_s.presence || "Killed by SIG{{ sig.id }}", secrets), stats: stats)
           end
           exit 1
         end

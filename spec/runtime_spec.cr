@@ -35,7 +35,7 @@ describe Enable::Runtime do
     it "runs grok and agy with the prompt after -p" do
       Runtime.argv("grok", "do it").should eq(["grok", "-p", "do it", "--output-format", "json", "--always-approve"])
       Runtime.argv("agy", "do it", model: "g").should eq(
-        Runtime::KEYRING_ARGV + ["agy", "-p", "do it", "--output-format", "json", "--dangerously-skip-permissions", "--model", "g"])
+        Runtime::KEYRING_ARGV + ["agy", "-p", "do it", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "g"])
     end
 
     # agy keeps its Google login only in a Secret Service; the gem's adapter runs it in a
@@ -110,12 +110,13 @@ describe Enable::Runtime do
       r.output.should eq(stream)
     end
 
-    it "reads a codex run whose turn completed as done, with no stats or session" do
+    it "reads a codex run whose turn completed as done, with its tokens and no session" do
       r = Runtime.result("codex", fixture("codex_ok.jsonl"), 0)
       r.status.should eq("done")
       r.output.should eq(fixture("codex_ok.jsonl"))
       r.session_id.should be_nil
-      r.stats.should be_empty
+      r.stats.keys.should eq(["usage"])
+      r.stats["usage"]["input_tokens"].should eq(2410)
     end
 
     it "fails a codex run whose last turn failed, and hides the key codex echoed" do
@@ -146,9 +147,31 @@ describe Enable::Runtime do
     it "reads agy's status, exit code 3, and duration_seconds" do
       ok = Runtime.result("agy", fixture("agy_ok.json"), 0)
       ok.status.should eq("done")
-      ok.stats.should eq({"num_turns" => JSON::Any.new(2_i64), "duration_ms" => JSON::Any.new(7500_i64)})
+      ok.stats["num_turns"].should eq(2)
+      ok.stats["duration_ms"].should eq(7500)
+      ok.stats["usage"]["cache_read_input_tokens"].should eq(0)
       Runtime.result("agy", fixture("agy_bad_key.txt"), 0).status.should eq("failed")
       Runtime.result("agy", fixture("agy_ok.json"), 3).status.should eq("failed")
+    end
+
+    it "reads agy's stream: posts its result object, with its turns, time and tokens" do
+      ok = Runtime.result("agy", fixture("agy_stream_ok.jsonl"), 0)
+      ok.status.should eq("done")
+      JSON.parse(ok.output)["response"].should eq("done\n")
+      ok.stats["num_turns"].should eq(1)
+      ok.stats["duration_ms"].should eq(10000)
+      ok.stats["usage"]["input_tokens"].should eq(18079)
+      ok.stats["usage"]["cache_read_input_tokens"].should eq(8084)
+      Runtime.result("agy", %({"event":"result","result":{"status":"ERROR","response":"","error":"quota"}}\n), 0).status.should eq("failed")
+    end
+
+    # A run the limit stops never prints its result: what its steps used is still known.
+    it "sums agy's steps' tokens when the stream has no result" do
+      stopped = fixture("agy_stream_ok.jsonl").lines(chomp: false)[0..-2].join
+      stats = Runtime.stats(Runtime.events(stopped))
+      stats["usage"]["input_tokens"].should eq(18079)
+      stats["usage"]["output_tokens"].should eq(766)
+      stats["duration_ms"]?.should be_nil
     end
 
     it "fails any runtime on a non-zero exit, and says why from stderr when stdout is empty" do
@@ -184,6 +207,11 @@ describe Enable::Runtime do
       Runtime.describe("codex", %({"type":"turn.started"}\n)).should eq([%({"type":"turn.started"})])
       Runtime.describe("grok", "   \n").should be_empty
       Runtime.describe("agy", "key sk-abcdefgh99 printed").should eq(["key [hidden] printed"])
+    end
+
+    it "shows agy's tool calls and result while the run works" do
+      lines = fixture("agy_stream_ok.jsonl").lines.flat_map { |l| Runtime.describe("agy", l) }
+      lines.should eq(["Session started", "→ run_command: ls", "done", "Finished: SUCCESS, 1 turns, 10.0s"])
     end
   end
 end

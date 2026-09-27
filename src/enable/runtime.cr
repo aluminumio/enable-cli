@@ -13,7 +13,7 @@ module Enable
     extend self
 
     NAMES = %w[claude-code codex cursor grok agy]
-    STATS = %w[total_cost_usd duration_ms num_turns]
+    STATS = %w[total_cost_usd duration_ms num_turns usage]
     # How long one printed line of a running run may be.
     LINE = 160
     # What looks like a key or token, for keys enbl does not know by name. Codex
@@ -54,7 +54,9 @@ module Enable
         args = ["grok", "-p", prompt, "--output-format", "json", "--always-approve"]
         args.push("--model", model_flag) if model_flag
       when "agy"
-        args = KEYRING_ARGV + ["agy", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"]
+        # stream-json prints each step as it happens; its last event holds the object
+        # --output-format json printed, and that is what is posted.
+        args = KEYRING_ARGV + ["agy", "-p", prompt, "--output-format", "stream-json", "--dangerously-skip-permissions"]
         args.push("--model", model_flag) if model_flag
       else
         raise ArgumentError.new("Unknown runtime: #{runtime}")
@@ -92,7 +94,8 @@ module Enable
       failed = exit_code != 0 || error?(runtime, events, exit_code)
       # claude-code streams its events; Rails reads the result event, as it read the one object
       # before. A run that never reached it posts all it printed.
-      output = (result_line(stdout) if runtime == "claude-code" && events.size > 1) || stdout
+      output = (result_line(stdout) if runtime == "claude-code" && events.size > 1) ||
+               (events.reverse.find { |e| e["response"]? }.try(&.to_json) if runtime == "agy") || stdout
       if failed && output.blank?
         output = stderr.lines.last(20).join.presence || "#{runtime} exited with #{exit_code || "unknown"} and printed nothing"
       end
@@ -120,25 +123,38 @@ module Enable
       end
     end
 
-    # total_cost_usd, duration_ms and num_turns where the CLI reports them; the last
-    # event that has one wins. agy reports duration_seconds.
+    # total_cost_usd, duration_ms, num_turns and usage where the CLI reports them; the last
+    # event that has one wins. agy reports duration_seconds, and usage per step: a run stopped
+    # before its result has the sum of its steps' usage.
     def stats(events : Array(JSON::Any)) : Hash(String, JSON::Any)
       stats = {} of String => JSON::Any
+      steps = Hash(String, Int64).new(0_i64)
       events.each do |e|
+        if e["step_index"]?
+          e["usage"]?.try(&.as_h?).try(&.each { |k, v| v.as_i64?.try { |n| steps[k] += n } })
+          next
+        end
         STATS.each { |k| stats[k] = e[k] if e[k]? }
         if !e["duration_ms"]? && (secs = e["duration_seconds"]?) && (n = secs.as_f? || secs.as_i64?.try(&.to_f))
           stats["duration_ms"] = JSON::Any.new((n * 1000).round.to_i64)
         end
+      end
+      stats["usage"] ||= JSON.parse(steps.to_json) unless steps.empty?
+      # Enable reads Claude's name for tokens read from the cache; agy calls them cache_read_tokens.
+      if (usage = stats["usage"]?.try(&.as_h?)) && (cached = usage["cache_read_tokens"]?)
+        stats["usage"] = JSON::Any.new(usage.merge({"cache_read_input_tokens" => cached}))
       end
       stats
     end
 
     # The JSON objects in +text+: the whole text when it is one object (claude-code,
     # cursor), else each line that is one (codex, grok and agy print events or logs).
+    # agy's stream nests each event under its name ({"event":"result","result":{...}}),
+    # and the inner object is the event.
     def events(text : String) : Array(JSON::Any)
       whole = object(text)
-      return [whole] if whole
-      text.each_line.compact_map { |line| object(line) }.to_a
+      return [unwrap(whole)] if whole
+      text.each_line.compact_map { |line| object(line).try { |e| unwrap(e) } }.to_a
     end
 
     # The lines to show for one line a CLI printed, while the run works: claude-code's events in
@@ -146,7 +162,11 @@ module Enable
     def describe(runtime : String, line : String, secrets : Enumerable(String) = [] of String) : Array(String)
       text = line.strip
       return [] of String if text.empty?
-      lines = runtime == "claude-code" ? claude_lines(text) : [text]
+      lines = case runtime
+              when "claude-code" then claude_lines(text)
+              when "agy"         then agy_lines(text)
+              else                    [text]
+              end
       lines.compact_map { |l| short(redact(l, secrets)).presence }
     end
 
@@ -175,6 +195,35 @@ module Enable
       else
         [] of String
       end
+    end
+
+    # agy's steps: each tool call as it starts, a step that failed, and the result.
+    private def agy_lines(text : String) : Array(String)
+      event = object(text)
+      return [text] unless event
+      step = unwrap(event)
+      case event["event"]?.try(&.as_s?)
+      when "init"
+        ["Session started"]
+      when "step_update"
+        if step["state"]? == "ERROR"
+          ["← error: #{step["error"]? || step["step_type"]?}"]
+        elsif step["step_type"]? == "tool" && step["state"]? == "ACTIVE"
+          ["→ #{step["tool_name"]? || "tool"}: #{tool_summary(step.dig?("tool_info", "parameters"))}"]
+        else
+          [] of String
+        end
+      when "result"
+        response = step["response"]?.try(&.as_s?).to_s.lines.first?
+        [response, "Finished: #{step["status"]?}, #{step["num_turns"]?} turns, #{step["duration_seconds"]?.try(&.as_f?).try(&.round(1))}s"].compact
+      else
+        [text]
+      end
+    end
+
+    private def unwrap(event : JSON::Any) : JSON::Any
+      name = event["event"]?.try(&.as_s?)
+      (name && event[name]?.try { |inner| inner if inner.as_h? }) || event
     end
 
     private def content(event : JSON::Any) : Array(JSON::Any)
