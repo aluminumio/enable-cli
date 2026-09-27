@@ -2,9 +2,10 @@ require "http/client"
 require "json"
 require "option_parser"
 require "./enable/runtime"
+require "./enable/fields"
 
 module Enable
-  VERSION = "0.10.1"
+  VERSION = "0.10.2"
 
   CONFIG_DIR       = Path.home / ".config" / "enable"
   CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
@@ -195,7 +196,7 @@ module Enable
           creds = Credentials.new(
             access_token: result["token"].as_s,
             refresh_token: result["refresh_token"]?.try(&.as_s?),
-            email: result["email"]?.try(&.as_s),
+            email: Enable.str(result, "email"),
           )
           Config.save_credentials(creds)
           puts "Authenticated as #{creds.email || "unknown"}."
@@ -300,11 +301,11 @@ module Enable
         Output.record([
           {"Contract", data["contract_id"].as_s[0..7]},
           {"Company", "#{data["company_name"]} (#{data["company_id"].as_s[0..7]})"},
-          {"Role", data["role"]?.try(&.as_s) || ""},
+          {"Role", Enable.str(data, "role") || ""},
           {"Status", data["status"].as_s},
-          {"Name", data["name"]?.try(&.as_s) || ""},
-          {"Email", data["email"]?.try(&.as_s) || ""},
-          {"Manager", data["manager_id"]?.try(&.as_s.try { |s| s[0..7] }) || "(none)"},
+          {"Name", Enable.str(data, "name") || ""},
+          {"Email", Enable.str(data, "email") || ""},
+          {"Manager", Enable.str(data, "manager_id").try { |s| s[0..7] } || "(none)"},
         ])
       else
         puts "User: #{data["email"]}"
@@ -338,7 +339,7 @@ module Enable
         {"ID", data["id"].as_s},
         {"Name", data["name"].as_s},
         {"Status", data["status"].as_s},
-        {"Mission", data["mission"]?.try(&.as_s) || ""},
+        {"Mission", Enable.str(data, "mission") || ""},
         {"Agents", data["agent_count"].to_s},
         {"Created", data["created_at"].as_s[0..9]},
       ])
@@ -376,8 +377,7 @@ module Enable
       Output.json(data)
     else
       rows = data.as_a.map do |c|
-        profile = c["profile"]?
-        [c["id"].as_s[0..7], profile.try { |p| p["name"]?.try(&.as_s) } || "", c["role"]?.try(&.as_s) || "", c["status"].as_s]
+        [c["id"].as_s[0..7], Enable.name(c, "profile") || "", Enable.str(c, "role") || "", c["status"].as_s]
       end
       Output.table(["ID", "AGENT", "ROLE", "STATUS"], rows)
     end
@@ -388,20 +388,19 @@ module Enable
     if Output.json_mode?
       Output.json(data)
     else
-      profile = data["profile"]?
       Output.record([
         {"ID", data["id"].as_s},
-        {"Agent", profile.try { |p| p["name"]?.try(&.as_s) } || ""},
-        {"Role", data["role"]?.try(&.as_s) || ""},
+        {"Agent", Enable.name(data, "profile") || ""},
+        {"Role", Enable.str(data, "role") || ""},
         {"Status", data["status"].as_s},
         {"Rate", "$#{data["hourly_rate"]}/hr"},
-        {"Start", data["start_date"]?.try(&.as_s) || ""},
-        {"Heartbeat", data["heartbeat_status"]?.try(&.as_s) || ""},
+        {"Start", Enable.str(data, "start_date") || ""},
+        {"Heartbeat", Enable.str(data, "heartbeat_status") || ""},
       ])
-      if chain = data["chain_of_command"]?.try(&.as_a)
+      if chain = data["chain_of_command"]?.try(&.as_a?)
         unless chain.empty?
           puts "\nChain of command:"
-          chain.each { |c| puts "  #{c["name"]?.try(&.as_s)} (#{c["role"]?.try(&.as_s)})" }
+          chain.each { |c| puts "  #{Enable.str(c, "name")} (#{Enable.str(c, "role")})" }
         end
       end
     end
@@ -413,8 +412,7 @@ module Enable
       Output.json(data)
     else
       rows = data.as_a.map do |t|
-        assignee = t["assignee"]?
-        [t["id"].as_s[0..7], t["title"].as_s[0..39], t["status"].as_s, t["priority"].as_s, assignee.try { |a| a["name"]?.try(&.as_s) } || ""]
+        [t["id"].as_s[0..7], t["title"].as_s[0..39], t["status"].as_s, t["priority"].as_s, Enable.name(t, "assignee") || ""]
       end
       Output.table(["ID", "TITLE", "STATUS", "PRIORITY", "ASSIGNEE"], rows)
     end
@@ -425,20 +423,11 @@ module Enable
     if Output.json_mode?
       Output.json(data)
     else
-      assignee = data["assignee"]?
-      Output.record([
-        {"ID", data["id"].as_s},
-        {"Title", data["title"].as_s},
-        {"Status", data["status"].as_s},
-        {"Priority", data["priority"].as_s},
-        {"Assignee", assignee.try { |a| a["name"]?.try(&.as_s) } || "(unassigned)"},
-        {"Due", data["due_date"]?.try(&.as_s) || "(none)"},
-        {"Created", data["created_at"].as_s[0..9]},
-      ])
-      if desc = data["description"]?.try(&.as_s)
+      Output.record(Enable.task_record(data))
+      if desc = Enable.str(data, "description")
         puts "\n#{desc}" unless desc.empty?
       end
-      if subtasks = data["subtasks"]?.try(&.as_a)
+      if subtasks = data["subtasks"]?.try(&.as_a?)
         unless subtasks.empty?
           puts "\nSubtasks:"
           subtasks.each { |s| puts "  [#{s["status"]}] #{s["title"]}" }
@@ -502,7 +491,7 @@ module Enable
     if Output.json_mode?
       Output.json(data)
     else
-      count = data["comments"]?.try(&.as_a.size) || 0
+      count = data["comments"]?.try(&.as_a?).try(&.size) || 0
       puts "Comment added (#{count} total)."
     end
   end
@@ -513,8 +502,7 @@ module Enable
       Output.json(data)
     else
       rows = data.as_a.map do |a|
-        requester = a["requester"]?
-        [a["id"].as_s[0..7], a["gate_type"].as_s, a["status"].as_s, requester.try { |r| r["name"]?.try(&.as_s) } || ""]
+        [a["id"].as_s[0..7], a["gate_type"].as_s, a["status"].as_s, Enable.name(a, "requester") || ""]
       end
       Output.table(["ID", "GATE", "STATUS", "REQUESTER"], rows)
     end
@@ -525,23 +513,22 @@ module Enable
     if Output.json_mode?
       Output.json(data)
     else
-      requester = data["requester"]?
       Output.record([
         {"ID", data["id"].as_s},
         {"Gate", data["gate_type"].as_s},
         {"Status", data["status"].as_s},
-        {"Requester", requester.try { |r| r["name"]?.try(&.as_s) } || ""},
+        {"Requester", Enable.name(data, "requester") || ""},
         {"Created", data["created_at"].as_s[0..9]},
       ])
       if payload = data["payload"]?
         puts "\nPayload:"
         puts payload.to_pretty_json
       end
-      if comments = data["comments"]?.try(&.as_a)
+      if comments = data["comments"]?.try(&.as_a?)
         unless comments.empty?
           puts "\nComments:"
           comments.each do |c|
-            puts "  [#{c["at"]?.try(&.as_s.try { |s| s[0..9] })}] #{c["author"]}: #{c["body"]}"
+            puts "  [#{Enable.str(c, "at").try { |s| s[0..9] }}] #{c["author"]}: #{c["body"]}"
           end
         end
       end
@@ -582,7 +569,7 @@ module Enable
       Output.json(data)
     else
       rows = data.as_a.map do |e|
-        [e["created_at"].as_s[0..15], e["action"].as_s, e["actor_type"]?.try(&.as_s) || ""]
+        [e["created_at"].as_s[0..15], e["action"].as_s, Enable.str(e, "actor_type") || ""]
       end
       Output.table(["TIME", "ACTION", "ACTOR"], rows)
     end
@@ -594,7 +581,7 @@ module Enable
       Output.json(data)
     else
       rows = data.as_a.map do |p|
-        [p["id"].as_s[0..7], p["name"].as_s, p["location"]?.try(&.as_s) || "", p["ai_model"]?.try(&.as_s) || ""]
+        [p["id"].as_s[0..7], p["name"].as_s, Enable.str(p, "location") || "", Enable.str(p, "ai_model") || ""]
       end
       Output.table(["ID", "NAME", "LOCATION", "MODEL"], rows)
     end
@@ -608,19 +595,19 @@ module Enable
       Output.record([
         {"ID", data["id"].as_s},
         {"Name", data["name"].as_s},
-        {"Location", data["location"]?.try(&.as_s) || ""},
-        {"Model", data["ai_model"]?.try(&.as_s) || ""},
+        {"Location", Enable.str(data, "location") || ""},
+        {"Model", Enable.str(data, "ai_model") || ""},
       ])
-      if desc = data["description"]?.try(&.as_s)
+      if desc = Enable.str(data, "description")
         puts "\n#{desc}" unless desc.empty?
       end
-      if bg = data["background"]?.try(&.as_s)
+      if bg = Enable.str(data, "background")
         puts "\nBackground: #{bg}" unless bg.empty?
       end
       {"strengths", "weaknesses", "interests"}.each do |field|
-        if items = data[field]?.try(&.as_a)
+        if items = data[field]?.try(&.as_a?)
           unless items.empty?
-            puts "\n#{field.capitalize}: #{items.map(&.as_s).join(", ")}"
+            puts "\n#{field.capitalize}: #{items.compact_map(&.as_s?).join(", ")}"
           end
         end
       end
@@ -633,8 +620,8 @@ module Enable
       Output.json(data)
     else
       rows = data.as_a.map do |c|
-        [c["id"].as_s[0..7], c["subject"]?.try(&.as_s) || "", c["profile_name"]?.try(&.as_s) || "",
-         c["from"]?.try(&.as_s) || "", c["created_at"].as_s[0..9]]
+        [c["id"].as_s[0..7], Enable.str(c, "subject") || "", Enable.str(c, "profile_name") || "",
+         Enable.str(c, "from") || "", c["created_at"].as_s[0..9]]
       end
       Output.table(["ID", "SUBJECT", "AGENT", "FROM", "DATE"], rows)
     end
@@ -647,13 +634,13 @@ module Enable
     else
       Output.record([
         {"ID", data["id"].as_s},
-        {"Subject", data["subject"]?.try(&.as_s) || ""},
-        {"Agent", data["profile_name"]?.try(&.as_s) || ""},
-        {"From", data["from"]?.try(&.as_s) || ""},
-        {"To", data["to"]?.try(&.as_s) || ""},
+        {"Subject", Enable.str(data, "subject") || ""},
+        {"Agent", Enable.str(data, "profile_name") || ""},
+        {"From", Enable.str(data, "from") || ""},
+        {"To", Enable.str(data, "to") || ""},
         {"Date", data["created_at"].as_s[0..9]},
       ])
-      if body = data["body"]?.try(&.as_s)
+      if body = Enable.str(data, "body")
         puts "\n#{body}" unless body.empty?
       end
     end
